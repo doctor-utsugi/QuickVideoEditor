@@ -106,6 +106,8 @@ mod imp {
         name: String,
         asset: ges::UriClipAsset,
         has_audio: bool,
+        /// Width and height of the video stream, if any.
+        size: Option<(i32, i32)>,
     }
 
     /// A segment as saved in the undo history.
@@ -160,6 +162,10 @@ mod imp {
         video_volume: Cell<f64>,
         end_fade: Cell<bool>,
         end_fade_clip: RefCell<Option<ges::Clip>>,
+        /// Clockwise rotation of the output in degrees: 0, 90, 180 or 270.
+        rotation: Cell<u32>,
+        /// Set once the clips' frame positions are managed here instead of by GES.
+        positioned: Cell<bool>,
 
         seek_in_flight: Cell<bool>,
         seek_started: Cell<Option<std::time::Instant>>,
@@ -342,15 +348,23 @@ mod imp {
             let info = asset.info();
             let has_audio = !info.audio_streams().is_empty();
             let has_video = !info.video_streams().is_empty();
+            let size = info
+                .video_streams()
+                .first()
+                .map(|video| (video.width() as i32, video.height() as i32));
 
             let mut sources = self.sources.borrow_mut();
             if sources.is_empty() {
                 self.has_video.set(has_video);
                 if let Some(video) = info.video_streams().first() {
                     // Render at the first video's size instead of GES's 1280×720 default.
+                    let (mut width, mut height) = (video.width() as i32, video.height() as i32);
+                    if self.rotation.get() % 180 != 0 {
+                        std::mem::swap(&mut width, &mut height);
+                    }
                     let caps = gst::Caps::builder("video/x-raw")
-                        .field("width", video.width() as i32)
-                        .field("height", video.height() as i32)
+                        .field("width", width)
+                        .field("height", height)
                         .field("framerate", video.framerate())
                         .build();
                     for track in self.timeline().tracks() {
@@ -369,6 +383,7 @@ mod imp {
                 name,
                 asset,
                 has_audio,
+                size,
             });
             Ok(sources.len() - 1)
         }
@@ -390,6 +405,7 @@ mod imp {
                 )
                 .map_err(|err| glib::Error::new(gio::IOErrorEnum::Failed, &err.to_string()))?;
             self.apply_audio_settings(&clip);
+            self.apply_rotation(&clip, source);
             Ok(Segment {
                 clip,
                 source,
@@ -713,7 +729,9 @@ mod imp {
         /// Sets the speed of `clip` so it plays `span` ns of source.
         fn apply_speed(&self, clip: &ges::Clip, span: u64, speed: f64, has_audio: bool) {
             for effect in clip.top_effects() {
-                let _ = clip.remove(&effect);
+                if !is_rotation_effect(&effect) {
+                    let _ = clip.remove(&effect);
+                }
             }
             // Keep the clip valid at every step: at rate 1 it can't play more than the span.
             let shortest = (span as f64 / speed.max(1.)) as u64;
@@ -761,6 +779,112 @@ mod imp {
             self.speed.set(speed);
             // The playhead keeps its source position; the deferred seek maps it at the new speed.
             self.request_commit();
+        }
+
+        pub(super) fn rotation(&self) -> u32 {
+            self.rotation.get()
+        }
+
+        /// Rotates every clip by `rotation` degrees clockwise, turning the output around it.
+        pub(super) fn set_rotation(&self, rotation: u32) {
+            let rotation = rotation % 360;
+            let previous = self.rotation.replace(rotation);
+            if previous == rotation {
+                return;
+            }
+            if (previous + rotation) % 180 != 0 {
+                if let Some(track) = self.video_track() {
+                    if let Some(mut caps) = track.restriction_caps() {
+                        if let Some(structure) = caps.make_mut().structure_mut(0) {
+                            let width = structure.get::<i32>("width");
+                            let height = structure.get::<i32>("height");
+                            if let (Ok(width), Ok(height)) = (width, height) {
+                                structure.set("width", height);
+                                structure.set("height", width);
+                            }
+                        }
+                        track.set_restriction_caps(&caps);
+                    }
+                }
+            }
+            self.refresh_rotation();
+            self.request_commit();
+        }
+
+        fn refresh_rotation(&self) {
+            for segment in self.segments.borrow().iter() {
+                self.apply_rotation(&segment.clip, segment.source);
+            }
+        }
+
+        /// Rotates a clip and fits it, rotated, into the output.
+        ///
+        /// GES scales a source to the output before its effects run, so a 90° turn would come
+        /// out stretched. Placing the source in the box its rotated frame fits in makes the
+        /// scaling before and after the turn cancel out.
+        fn apply_rotation(&self, clip: &ges::Clip, source: usize) {
+            let rotation = self.rotation.get();
+            for effect in clip.top_effects() {
+                if is_rotation_effect(&effect) {
+                    let _ = clip.remove(&effect);
+                }
+            }
+            if rotation == 0 && !self.positioned.get() {
+                return;
+            }
+            let Some((width, height)) = self.sources.borrow()[source].size else {
+                return;
+            };
+            if rotation != 0 {
+                let direction = match rotation {
+                    90 => "90r",
+                    180 => "180",
+                    _ => "90l",
+                };
+                let description = format!("videoflip video-direction={direction}");
+                match ges::Effect::new(&description) {
+                    Ok(effect) => {
+                        if let Err(err) = clip.add_top_effect(&effect, 0) {
+                            warn!("could not add {description}: {err}");
+                        }
+                    }
+                    Err(err) => {
+                        warn!("could not create {description}: {err}");
+                    }
+                }
+            }
+
+            let Some((output_width, output_height)) = self.output_size() else {
+                return;
+            };
+            let aspect = if rotation % 180 == 0 {
+                width as f64 / height as f64
+            } else {
+                height as f64 / width as f64
+            };
+            let (fit_width, fit_height) =
+                if output_width as f64 / output_height as f64 > aspect {
+                    ((output_height as f64 * aspect).round() as i32, output_height)
+                } else {
+                    (output_width, (output_width as f64 / aspect).round() as i32)
+                };
+            for (name, value) in [
+                ("width", fit_width),
+                ("height", fit_height),
+                ("posx", (output_width - fit_width) / 2),
+                ("posy", (output_height - fit_height) / 2),
+            ] {
+                if let Err(err) = clip.set_child_property(name, &value.to_value()) {
+                    warn!("could not set the clip's {name}: {err}");
+                }
+            }
+            self.positioned.set(true);
+        }
+
+        fn output_size(&self) -> Option<(i32, i32)> {
+            let caps = self.video_track()?.restriction_caps()?;
+            let structure = caps.structure(0)?;
+            Some((structure.get("width").ok()?, structure.get("height").ok()?))
         }
 
         pub(super) fn set_video_audio_muted(&self, muted: bool) {
@@ -944,6 +1068,7 @@ mod imp {
                 match segment.clip.split(position) {
                     Ok(clip) => {
                         self.apply_audio_settings(&clip);
+                        self.apply_rotation(&clip, segment.source);
                         let new = Segment {
                             clip,
                             source: segment.source,
@@ -1130,6 +1255,7 @@ mod imp {
                     }
                 };
                 self.apply_audio_settings(&clip);
+                self.apply_rotation(&clip, saved.source);
                 self.apply_speed(&clip, span, saved.speed, has_audio);
                 segments.push(Segment {
                     clip,
@@ -1457,6 +1583,7 @@ fade end {fade_end:?}, editor {}",
             }
             debug!("export caps: {caps}");
             track.set_restriction_caps(&caps);
+            self.refresh_rotation();
             self.timeline().commit_sync();
             Some(previous)
         }
@@ -1479,6 +1606,7 @@ fade end {fade_end:?}, editor {}",
             let _ = pipeline.set_state(gst::State::Null);
             if let (Some(caps), Some(track)) = (render.preview_caps.take(), self.video_track()) {
                 track.set_restriction_caps(&caps);
+                self.refresh_rotation();
                 self.timeline().commit_sync();
             }
             if !matches!(event, RenderEvent::Done) {
@@ -1495,6 +1623,13 @@ fade end {fade_end:?}, editor {}",
 
             (render.callback)(event);
         }
+    }
+
+    fn is_rotation_effect(effect: &ges::TrackElement) -> bool {
+        effect
+            .downcast_ref::<ges::Effect>()
+            .and_then(|effect| effect.bin_description())
+            .is_some_and(|description| description.starts_with("videoflip"))
     }
 
     /// Works around GES handing a speed effect's `videorate` a segment in timeline time while
@@ -1641,6 +1776,14 @@ impl VtEngine {
 
     pub fn set_speed(&self, speed: f64) {
         self.imp().set_speed(speed);
+    }
+
+    pub fn rotation(&self) -> u32 {
+        self.imp().rotation()
+    }
+
+    pub fn set_rotation(&self, rotation: u32) {
+        self.imp().set_rotation(rotation);
     }
 
     pub fn set_video_audio_muted(&self, muted: bool) {

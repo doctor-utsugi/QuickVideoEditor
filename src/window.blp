@@ -309,6 +309,24 @@ template $VtWindow : Adw.ApplicationWindow {
             valign: center;
           }
 
+          Box box_rotate {
+            valign: center;
+
+            styles ["linked"]
+
+            Button button_rotate_left {
+              icon-name: "object-rotate-left-symbolic";
+              /* Translators: Tooltip of the button that rotates the video 90° counterclockwise. */
+              tooltip-text: _("Rotate Counterclockwise");
+            }
+
+            Button button_rotate_right {
+              icon-name: "object-rotate-right-symbolic";
+              /* Translators: Tooltip of the button that rotates the video 90° clockwise. */
+              tooltip-text: _("Rotate Clockwise");
+            }
+          }
+
           MenuButton button_options {
             styles ["circular"]
 

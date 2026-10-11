@@ -127,6 +127,12 @@ mod imp {
         #[template_child]
         knob_speed: TemplateChild<VtKnob>,
         #[template_child]
+        box_rotate: TemplateChild<gtk::Box>,
+        #[template_child]
+        button_rotate_left: TemplateChild<gtk::Button>,
+        #[template_child]
+        button_rotate_right: TemplateChild<gtk::Button>,
+        #[template_child]
         button_options: TemplateChild<gtk::MenuButton>,
         #[template_child]
         toggle_mode: TemplateChild<adw::ToggleGroup>,
@@ -457,15 +463,20 @@ Please choose another file.",
 
             self.box_start_end.set_visible(!editor);
             self.box_editor.set_visible(editor);
-            let options: &gtk::Widget = self.button_options.upcast_ref();
             let target: &gtk::Box = if editor {
                 &self.box_editor_options
             } else {
                 &self.box_start_end
             };
-            if options.parent().as_ref() != Some(target.upcast_ref()) {
-                options.unparent();
-                target.append(options);
+            // Both modes share the rotation buttons and the options menu.
+            for widget in [
+                self.box_rotate.upcast_ref::<gtk::Widget>(),
+                self.button_options.upcast_ref(),
+            ] {
+                if widget.parent().as_ref() != Some(target.upcast_ref()) {
+                    widget.unparent();
+                    target.append(widget);
+                }
             }
             self.switch_row_reencode.set_sensitive(!editor);
 
@@ -598,7 +609,10 @@ will be lost.",
             // Presets keep the source's aspect ratio; sizes are even, as encoders require.
             let even = |value: f64| ((value / 2.).round() as i32 * 2).max(2);
             let preset = |height: i32| {
-                let (width, source_height) = self.source_size.get().unwrap_or((16, 9));
+                let (mut width, mut source_height) = self.source_size.get().unwrap_or((16, 9));
+                if self.video_preview.engine().rotation() % 180 != 0 {
+                    std::mem::swap(&mut width, &mut source_height);
+                }
                 (
                     even(height as f64 * width as f64 / source_height as f64),
                     height,
@@ -614,6 +628,13 @@ will be lost.",
                 _ => None,
             };
             ExportSettings { fps, size }
+        }
+
+        /// Rotates the video by `degrees` clockwise; negative turns counterclockwise.
+        pub fn rotate(&self, degrees: i32) {
+            let engine = self.video_preview.engine();
+            let rotation = (engine.rotation() as i32 + degrees).rem_euclid(360);
+            engine.set_rotation(rotation as u32);
         }
 
         fn export_edit(&self) {
@@ -926,6 +947,7 @@ Please choose another file.",
             debug!("output path: {:?}", output_path);
 
             let speed = self.speed.get();
+            let rotation = self.video_preview.engine().rotation();
             let video_filters = self.export_settings().ffmpeg_filters();
             let filter = if music.is_some() || speed != 1. || !video_filters.is_empty() {
                 parse::timestamp(&start)
@@ -979,6 +1001,16 @@ Please choose another file.",
                 "-y".as_ref(),
             ]
             .to_vec();
+            // The rotation goes into the display matrix, so stream copies stay lossless; when
+            // re-encoding, FFmpeg turns the frames themselves. It counts counterclockwise.
+            let display_rotation = format!("-{rotation}");
+            if rotation != 0 {
+                let input = args.iter().position(|arg| *arg == "-i").unwrap();
+                args.splice(
+                    input..input,
+                    ["-display_rotation:v".as_ref(), display_rotation.as_ref()],
+                );
+            }
             if let Some(filter) = &filter {
                 args.extend(filter.args.iter().map(OsString::as_os_str));
                 if !filter.reencode_video && !reencode {
@@ -1740,6 +1772,21 @@ Please choose another file.",
             });
             self.stack.add_controller(drop_target);
 
+            self.button_rotate_left.connect_clicked({
+                let obj = obj.downgrade();
+                move |_| {
+                    let obj = obj.upgrade().unwrap();
+                    obj.imp().rotate(-90);
+                }
+            });
+            self.button_rotate_right.connect_clicked({
+                let obj = obj.downgrade();
+                move |_| {
+                    let obj = obj.upgrade().unwrap();
+                    obj.imp().rotate(90);
+                }
+            });
+
             self.speed.set(1.);
             self.knob_speed.connect_local("value-changed", false, {
                 let obj = obj.downgrade();
@@ -2041,6 +2088,12 @@ impl VtWindow {
     /// Sets the Trimmer speed once the video is loaded.
     pub fn set_speed(&self, speed: f64) {
         self.imp().queue_speed(speed);
+    }
+
+    /// Rotates the video clockwise, rounding to a quarter turn.
+    pub fn set_rotation(&self, degrees: i32) {
+        let quarters = (degrees as f64 / 90.).round() as i32;
+        self.imp().rotate(quarters * 90);
     }
 
     /// Exports the edit to `file` and quits once the videos are loaded.

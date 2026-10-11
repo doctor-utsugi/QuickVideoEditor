@@ -27,6 +27,7 @@ mod imp {
         precise: Cell<bool>,
         remove_audio: Cell<bool>,
         speed: Cell<Option<f64>>,
+        rotation: Cell<Option<i32>>,
         export_fps: Cell<Option<i32>>,
         export_size: RefCell<Option<String>>,
     }
@@ -122,6 +123,17 @@ mod imp {
             );
 
             obj.add_main_option(
+                "rotate",
+                glib::Char::from(0u8),
+                glib::OptionFlags::NONE,
+                glib::OptionArg::Int,
+                // Translators: --rotate commandline option description.
+                &gettext("Rotate the video clockwise by a multiple of 90 degrees"),
+                // Translators: --rotate commandline option arg description.
+                Some(&gettext("DEGREES")),
+            );
+
+            obj.add_main_option(
                 "fps",
                 glib::Char::from(0u8),
                 glib::OptionFlags::NONE,
@@ -171,6 +183,9 @@ mod imp {
             }
             if let Some(speed) = self.speed.take() {
                 window.set_speed(speed);
+            }
+            if let Some(rotation) = self.rotation.take() {
+                window.set_rotation(rotation);
             }
             let size = self.export_size.take().and_then(|size| {
                 let (width, height) = size.split_once('x')?;
@@ -301,6 +316,12 @@ mod imp {
                 options
                     .lookup_value("speed", None)
                     .and_then(|x| x.get::<f64>()),
+            );
+
+            self.rotation.set(
+                options
+                    .lookup_value("rotate", None)
+                    .and_then(|x| x.get::<i32>()),
             );
 
             self.parent_handle_local_options(options)
