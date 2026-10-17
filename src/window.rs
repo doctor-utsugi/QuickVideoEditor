@@ -1422,7 +1422,7 @@ Please choose another file.",
             klass.install_action("win.about", None, |window, _, _| {
                 let resource_path = "/io/github/doctor_utsugi/QuickVideoEditor/\
                                      io.github.doctor_utsugi.QuickVideoEditor.metainfo.xml";
-                let about_window = adw::AboutDialog::from_appdata(resource_path, Some("0.1.0"));
+                let about_window = adw::AboutDialog::from_appdata(resource_path, Some("0.1.1"));
                 about_window.set_version(config::VERSION);
                 // Translators: shown in the About dialog, put your name here.
                 about_window.set_translator_credits(&gettext("translator-credits"));
@@ -1841,6 +1841,69 @@ Please choose another file.",
                     }
                 }
             });
+
+            // Closing a combo row's dropdown inside the options popover drops the popover's grab,
+            // so it no longer closes by itself on an outside click or Escape.
+            let click = gtk::GestureClick::new();
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            click.connect_pressed({
+                let obj = obj.downgrade();
+                move |gesture, _, _, _| {
+                    let obj = obj.upgrade().unwrap();
+                    let popover = &obj.imp().popover_options;
+                    let on_window = gesture
+                        .current_event()
+                        .and_then(|event| event.surface())
+                        .is_some_and(|surface| obj.surface().as_ref() == Some(&surface));
+                    if popover.is_visible() && on_window {
+                        popover.popdown();
+                    }
+                }
+            });
+            obj.add_controller(click);
+
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            keys.connect_key_pressed({
+                let obj = obj.downgrade();
+                move |_, key, _, _| {
+                    let obj = obj.upgrade().unwrap();
+                    let popover = &obj.imp().popover_options;
+                    if key == Key::Escape && popover.is_visible() {
+                        popover.popdown();
+                        return glib::Propagation::Stop;
+                    }
+                    glib::Propagation::Proceed
+                }
+            });
+            obj.add_controller(keys);
+
+            // Reopening the options popover after a dropdown closes gives it its grab back, so
+            // clicks in other applications close it too.
+            let mut dropdowns = Vec::new();
+            with_recursive_children(self.popover_options.upcast_ref(), &mut |widget| {
+                if let Some(popover) = widget.downcast_ref::<gtk::Popover>() {
+                    if popover != &*self.popover_options {
+                        dropdowns.push(popover.clone());
+                    }
+                }
+            });
+            for dropdown in dropdowns {
+                dropdown.connect_closed({
+                    let obj = obj.downgrade();
+                    move |_| {
+                        let obj = obj.clone();
+                        glib::idle_add_local_once(move || {
+                            let Some(obj) = obj.upgrade() else { return };
+                            let popover = &obj.imp().popover_options;
+                            if popover.is_visible() {
+                                popover.popdown();
+                                popover.popup();
+                            }
+                        });
+                    }
+                });
+            }
         }
     }
 
