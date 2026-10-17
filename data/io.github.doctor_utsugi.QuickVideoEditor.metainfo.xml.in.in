@@ -42,6 +42,14 @@
 		<color type="primary" scheme_preference="dark">#1c3f68</color>
 	</branding>
 	<releases>
+		<release version="0.1.1" date="2026-10-17">
+			<description>
+				<ul>
+					<li>Buttons to rotate the video in the Trimmer and the Editor.</li>
+					<li>The options menu closes again on an outside click or Escape after changing the frame rate or resolution.</li>
+				</ul>
+			</description>
+		</release>
 		<release version="0.1.0" date="2026-09-27">
 			<description>
 				<p>First release of Quick Video Editor, a fork of Video Trimmer 26.03.1.</p>

@@ -1,6 +1,6 @@
 # Maintainer: doctor-utsugi <338306984+doctor-utsugi@users.noreply.github.com>
 pkgname=quick-video-editor
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Trim, cut, speed up and crossfade videos, with music"
 arch=('x86_64' 'aarch64')
