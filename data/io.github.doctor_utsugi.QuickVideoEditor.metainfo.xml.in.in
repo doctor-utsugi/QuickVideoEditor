@@ -42,6 +42,13 @@
 		<color type="primary" scheme_preference="dark">#1c3f68</color>
 	</branding>
 	<releases>
+		<release version="0.1.2" date="2026-10-18">
+			<description>
+				<ul>
+					<li>Crop the video in the Trimmer and the Editor with a rectangle drawn over the preview.</li>
+				</ul>
+			</description>
+		</release>
 		<release version="0.1.1" date="2026-10-17">
 			<description>
 				<ul>
