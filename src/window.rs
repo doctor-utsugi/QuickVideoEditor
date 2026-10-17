@@ -133,6 +133,8 @@ mod imp {
         #[template_child]
         button_rotate_right: TemplateChild<gtk::Button>,
         #[template_child]
+        button_crop: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         button_options: TemplateChild<gtk::MenuButton>,
         #[template_child]
         toggle_mode: TemplateChild<adw::ToggleGroup>,
@@ -163,6 +165,8 @@ mod imp {
         /// Videos to add once the first one is ready.
         pending_videos: RefCell<Vec<gio::File>>,
         pending_speed: Cell<Option<f64>>,
+        /// Crop from the command line as width, height, x and y in pixels of the rotated frame.
+        pending_crop: Cell<Option<(i32, i32, i32, i32)>>,
         /// Command-line export to run once everything is loaded.
         pending_export: RefCell<Option<PathBuf>>,
         speed: Cell<f64>,
@@ -609,10 +613,8 @@ will be lost.",
             // Presets keep the source's aspect ratio; sizes are even, as encoders require.
             let even = |value: f64| ((value / 2.).round() as i32 * 2).max(2);
             let preset = |height: i32| {
-                let (mut width, mut source_height) = self.source_size.get().unwrap_or((16, 9));
-                if self.video_preview.engine().rotation() % 180 != 0 {
-                    std::mem::swap(&mut width, &mut source_height);
-                }
+                let (width, source_height) =
+                    self.video_preview.engine().frame_size().unwrap_or((16, 9));
                 (
                     even(height as f64 * width as f64 / source_height as f64),
                     height,
@@ -635,6 +637,30 @@ will be lost.",
             let engine = self.video_preview.engine();
             let rotation = (engine.rotation() as i32 + degrees).rem_euclid(360);
             engine.set_rotation(rotation as u32);
+            self.video_preview.refresh_crop_overlay();
+        }
+
+        /// Crops to `width`×`height` pixels at `x`, `y` of the rotated frame.
+        fn apply_pixel_crop(&self, (width, height, x, y): (i32, i32, i32, i32)) {
+            let engine = self.video_preview.engine();
+            let Some((frame_width, frame_height)) = engine.rotated_size() else {
+                return;
+            };
+            let (frame_width, frame_height) = (frame_width as f64, frame_height as f64);
+            engine.set_crop(crate::engine::Crop {
+                x: x as f64 / frame_width,
+                y: y as f64 / frame_height,
+                width: width as f64 / frame_width,
+                height: height as f64 / frame_height,
+            });
+        }
+
+        pub fn queue_crop(&self, crop: (i32, i32, i32, i32)) {
+            if self.video_preview.duration() > 0 {
+                self.apply_pixel_crop(crop);
+            } else {
+                self.pending_crop.set(Some(crop));
+            }
         }
 
         fn export_edit(&self) {
@@ -754,6 +780,8 @@ Please choose another file.",
         }
 
         fn verify_and_trim(&self) {
+            // Leave crop editing so the export gets the crop.
+            self.button_crop.set_active(false);
             if self.video_preview.is_editor() {
                 self.export_edit();
                 return;
@@ -948,7 +976,11 @@ Please choose another file.",
 
             let speed = self.speed.get();
             let rotation = self.video_preview.engine().rotation();
-            let video_filters = self.export_settings().ffmpeg_filters();
+            let mut video_filters = self.export_settings().ffmpeg_filters();
+            // FFmpeg rotates the frames before the filters, so the crop applies as shown.
+            if let Some(crop) = self.video_preview.engine().crop().ffmpeg_filter() {
+                video_filters.insert(0, crop);
+            }
             let filter = if music.is_some() || speed != 1. || !video_filters.is_empty() {
                 parse::timestamp(&start)
                     .zip(parse::timestamp(&end))
@@ -1422,7 +1454,7 @@ Please choose another file.",
             klass.install_action("win.about", None, |window, _, _| {
                 let resource_path = "/io/github/doctor_utsugi/QuickVideoEditor/\
                                      io.github.doctor_utsugi.QuickVideoEditor.metainfo.xml";
-                let about_window = adw::AboutDialog::from_appdata(resource_path, Some("0.1.1"));
+                let about_window = adw::AboutDialog::from_appdata(resource_path, Some("0.1.2"));
                 about_window.set_version(config::VERSION);
                 // Translators: shown in the About dialog, put your name here.
                 about_window.set_translator_credits(&gettext("translator-credits"));
@@ -1629,6 +1661,9 @@ Please choose another file.",
                         if let Some(speed) = imp.pending_speed.take() {
                             imp.on_speed_changed(speed);
                         }
+                        if let Some(crop) = imp.pending_crop.take() {
+                            imp.apply_pixel_crop(crop);
+                        }
                         for file in imp.pending_videos.take() {
                             imp.add_video(file);
                         }
@@ -1777,6 +1812,13 @@ Please choose another file.",
                 move |_| {
                     let obj = obj.upgrade().unwrap();
                     obj.imp().rotate(-90);
+                }
+            });
+            self.button_crop.connect_toggled({
+                let obj = obj.downgrade();
+                move |button| {
+                    let obj = obj.upgrade().unwrap();
+                    obj.imp().video_preview.set_crop_editing(button.is_active());
                 }
             });
             self.button_rotate_right.connect_clicked({
@@ -2157,6 +2199,11 @@ impl VtWindow {
     pub fn set_rotation(&self, degrees: i32) {
         let quarters = (degrees as f64 / 90.).round() as i32;
         self.imp().rotate(quarters * 90);
+    }
+
+    /// Crops to `width`×`height` pixels at `x`, `y` of the rotated frame.
+    pub fn set_crop(&self, crop: (i32, i32, i32, i32)) {
+        self.imp().queue_crop(crop);
     }
 
     /// Exports the edit to `file` and quits once the videos are loaded.

@@ -10,6 +10,7 @@
     <file alias="shortcuts-dialog.ui">shortcuts.ui</file>
     <file alias="icons/scalable/actions/broken-playback-symbolic.svg">../data/icons/broken-playback-symbolic.svg</file>
     <file alias="icons/scalable/actions/broken-video-symbolic.svg">../data/icons/broken-video-symbolic.svg</file>
+    <file alias="icons/scalable/actions/crop-symbolic.svg">../data/icons/crop-symbolic.svg</file>
     <file alias="icons/scalable/actions/nautilus-file-chooser-options-symbolic.svg">../data/icons/nautilus-file-chooser-options-symbolic.svg</file>
     <file alias="icons/scalable/actions/quick-video-editor-symbolic.svg">../data/icons/hicolor/symbolic/apps/io.github.doctor_utsugi.QuickVideoEditor-symbolic.svg</file>
     <file alias="icons/scalable/apps/org.gnome.gitlab.YaLTeR.Identity.svg">../data/icons/org.gnome.gitlab.YaLTeR.Identity.svg</file>

@@ -8,7 +8,14 @@ template $VtVideoPreview : Widget {
     child: Stack stack_video_preview {
       vexpand: true;
 
-      Picture picture_video_preview {}
+      Overlay {
+        child: Picture picture_video_preview {};
+
+        [overlay]
+        $VtCropOverlay crop_overlay {
+          visible: false;
+        }
+      }
 
       Adw.StatusPage status_page_no_video {
         icon-name: "broken-video-symbolic";

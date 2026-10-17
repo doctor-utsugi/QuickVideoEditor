@@ -70,6 +70,103 @@ pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     }
 }
 
+/// Part of the rotated frame that is kept, in fractions of its width and height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 1.,
+            height: 1.,
+        }
+    }
+}
+
+impl Crop {
+    /// Smallest side of a crop, so it stays visible and grabbable.
+    pub const MIN_SIZE: f64 = 0.05;
+
+    pub fn is_full(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Keeps the crop inside the frame and at least `MIN_SIZE` wide and tall.
+    pub fn clamped(self) -> Self {
+        let width = self.width.clamp(Self::MIN_SIZE, 1.);
+        let height = self.height.clamp(Self::MIN_SIZE, 1.);
+        Self {
+            x: self.x.clamp(0., 1. - width),
+            y: self.y.clamp(0., 1. - height),
+            width,
+            height,
+        }
+    }
+
+    /// Size in pixels of the crop of a `width`×`height` frame, even as encoders require.
+    pub fn size_of(&self, (width, height): (i32, i32)) -> (i32, i32) {
+        let even = |value: f64| ((value / 2.).round() as i32 * 2).max(2);
+        (
+            even(width as f64 * self.width),
+            even(height as f64 * self.height),
+        )
+    }
+
+    /// The same crop after turning the frame `rotation` degrees clockwise.
+    pub fn rotated(self, rotation: u32) -> Self {
+        let Self {
+            x,
+            y,
+            width,
+            height,
+        } = self;
+        match rotation {
+            90 => Self {
+                x: 1. - y - height,
+                y: x,
+                width: height,
+                height: width,
+            },
+            180 => Self {
+                x: 1. - x - width,
+                y: 1. - y - height,
+                width,
+                height,
+            },
+            270 => Self {
+                x: y,
+                y: 1. - x - width,
+                width: height,
+                height: width,
+            },
+            _ => self,
+        }
+    }
+
+    /// FFmpeg filter that crops frames that are already rotated.
+    pub fn ffmpeg_filter(&self) -> Option<String> {
+        if self.is_full() {
+            return None;
+        }
+        let Self {
+            x,
+            y,
+            width,
+            height,
+        } = self;
+        Some(format!(
+            "crop=trunc(iw*{width}/2)*2:trunc(ih*{height}/2)*2:trunc(iw*{x}):trunc(ih*{y})"
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RenderEvent {
     /// Fraction of the timeline rendered so far.
@@ -166,6 +263,9 @@ mod imp {
         rotation: Cell<u32>,
         /// Set once the clips' frame positions are managed here instead of by GES.
         positioned: Cell<bool>,
+        crop: Cell<Crop>,
+        /// Shows the whole frame while the crop is being edited.
+        crop_suspended: Cell<bool>,
 
         seek_in_flight: Cell<bool>,
         seek_started: Cell<Option<std::time::Instant>>,
@@ -362,6 +462,7 @@ mod imp {
                     if self.rotation.get() % 180 != 0 {
                         std::mem::swap(&mut width, &mut height);
                     }
+                    let (width, height) = self.effective_crop().size_of((width, height));
                     let caps = gst::Caps::builder("video/x-raw")
                         .field("width", width)
                         .field("height", height)
@@ -792,23 +893,77 @@ mod imp {
             if previous == rotation {
                 return;
             }
-            if (previous + rotation) % 180 != 0 {
-                if let Some(track) = self.video_track() {
-                    if let Some(mut caps) = track.restriction_caps() {
-                        if let Some(structure) = caps.make_mut().structure_mut(0) {
-                            let width = structure.get::<i32>("width");
-                            let height = structure.get::<i32>("height");
-                            if let (Ok(width), Ok(height)) = (width, height) {
-                                structure.set("width", height);
-                                structure.set("height", width);
-                            }
-                        }
-                        track.set_restriction_caps(&caps);
-                    }
-                }
-            }
+            self.crop.set(self.crop.get().rotated((rotation + 360 - previous) % 360));
+            self.update_output_size();
             self.refresh_rotation();
             self.request_commit();
+        }
+
+        pub(super) fn crop(&self) -> Crop {
+            self.crop.get()
+        }
+
+        pub(super) fn set_crop(&self, crop: Crop) {
+            let crop = crop.clamped();
+            if self.crop.replace(crop) == crop {
+                return;
+            }
+            if !self.crop_suspended.get() {
+                self.update_output_size();
+                self.refresh_rotation();
+                self.request_commit();
+            }
+        }
+
+        /// Shows the whole frame, ignoring the crop, while `suspended` is set.
+        pub(super) fn set_crop_suspended(&self, suspended: bool) {
+            if self.crop_suspended.replace(suspended) == suspended || self.crop.get().is_full() {
+                return;
+            }
+            self.update_output_size();
+            self.refresh_rotation();
+            self.request_commit();
+        }
+
+        fn effective_crop(&self) -> Crop {
+            if self.crop_suspended.get() {
+                Crop::default()
+            } else {
+                self.crop.get()
+            }
+        }
+
+        /// Size of the first video's frame once rotated.
+        pub(super) fn rotated_size(&self) -> Option<(i32, i32)> {
+            let (width, height) = self.sources.borrow().first()?.size?;
+            Some(if self.rotation.get() % 180 == 0 {
+                (width, height)
+            } else {
+                (height, width)
+            })
+        }
+
+        /// Size of the exported frame: the first video's, rotated and cropped.
+        pub(super) fn frame_size(&self) -> Option<(i32, i32)> {
+            Some(self.crop.get().size_of(self.rotated_size()?))
+        }
+
+        fn update_output_size(&self) {
+            let Some(size) = self.rotated_size() else {
+                return;
+            };
+            let (width, height) = self.effective_crop().size_of(size);
+            let Some(track) = self.video_track() else {
+                return;
+            };
+            let Some(mut caps) = track.restriction_caps() else {
+                return;
+            };
+            if let Some(structure) = caps.make_mut().structure_mut(0) {
+                structure.set("width", width);
+                structure.set("height", height);
+            }
+            track.set_restriction_caps(&caps);
         }
 
         fn refresh_rotation(&self) {
@@ -829,7 +984,8 @@ mod imp {
                     let _ = clip.remove(&effect);
                 }
             }
-            if rotation == 0 && !self.positioned.get() {
+            let crop = self.effective_crop();
+            if rotation == 0 && crop.is_full() && !self.positioned.get() {
                 return;
             }
             let Some((width, height)) = self.sources.borrow()[source].size else {
@@ -862,17 +1018,23 @@ mod imp {
             } else {
                 height as f64 / width as f64
             };
-            let (fit_width, fit_height) =
-                if output_width as f64 / output_height as f64 > aspect {
-                    ((output_height as f64 * aspect).round() as i32, output_height)
-                } else {
-                    (output_width, (output_width as f64 / aspect).round() as i32)
-                };
+            // The kept part fits the output, and the whole frame sticks out of it around it.
+            let (output_width, output_height) = (output_width as f64, output_height as f64);
+            let crop_aspect = aspect * crop.width / crop.height;
+            let (crop_width, crop_height) = if output_width / output_height > crop_aspect {
+                (output_height * crop_aspect, output_height)
+            } else {
+                (output_width, output_width / crop_aspect)
+            };
+            let fit_width = crop_width / crop.width;
+            let fit_height = crop_height / crop.height;
+            let posx = (output_width - crop_width) / 2. - crop.x * fit_width;
+            let posy = (output_height - crop_height) / 2. - crop.y * fit_height;
             for (name, value) in [
-                ("width", fit_width),
-                ("height", fit_height),
-                ("posx", (output_width - fit_width) / 2),
-                ("posy", (output_height - fit_height) / 2),
+                ("width", fit_width.round() as i32),
+                ("height", fit_height.round() as i32),
+                ("posx", posx.round() as i32),
+                ("posy", posy.round() as i32),
             ] {
                 if let Err(err) = clip.set_child_property(name, &value.to_value()) {
                     warn!("could not set the clip's {name}: {err}");
@@ -1786,6 +1948,26 @@ impl VtEngine {
         self.imp().set_rotation(rotation);
     }
 
+    pub fn crop(&self) -> Crop {
+        self.imp().crop()
+    }
+
+    pub fn set_crop(&self, crop: Crop) {
+        self.imp().set_crop(crop);
+    }
+
+    pub fn set_crop_suspended(&self, suspended: bool) {
+        self.imp().set_crop_suspended(suspended);
+    }
+
+    pub fn rotated_size(&self) -> Option<(i32, i32)> {
+        self.imp().rotated_size()
+    }
+
+    pub fn frame_size(&self) -> Option<(i32, i32)> {
+        self.imp().frame_size()
+    }
+
     pub fn set_video_audio_muted(&self, muted: bool) {
         self.imp().set_video_audio_muted(muted);
     }
@@ -1890,5 +2072,70 @@ impl VtEngine {
 
     pub fn cancel_render(&self) {
         self.imp().cancel_render();
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::Crop;
+
+    const CROP: Crop = Crop {
+        x: 0.1,
+        y: 0.2,
+        width: 0.3,
+        height: 0.4,
+    };
+
+    fn assert_close(a: Crop, b: Crop) {
+        for (a, b) in [(a.x, b.x), (a.y, b.y), (a.width, b.width), (a.height, b.height)] {
+            assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        }
+    }
+
+    #[test]
+    fn rotation_follows_the_frame() {
+        assert_close(
+            CROP.rotated(90),
+            Crop {
+                x: 0.4,
+                y: 0.1,
+                width: 0.4,
+                height: 0.3,
+            },
+        );
+        assert_close(CROP.rotated(90).rotated(270), CROP);
+        assert_close(CROP.rotated(180).rotated(180), CROP);
+        assert_close(CROP.rotated(90).rotated(90), CROP.rotated(180));
+    }
+
+    #[test]
+    fn full_crop_needs_no_filter() {
+        assert_eq!(Crop::default().ffmpeg_filter(), None);
+        assert!(CROP.ffmpeg_filter().unwrap().starts_with("crop="));
+    }
+
+    #[test]
+    fn sizes_are_even() {
+        assert_eq!(CROP.size_of((1276, 720)), (382, 288));
+    }
+
+    #[test]
+    fn clamping_keeps_the_crop_in_the_frame() {
+        let crop = Crop {
+            x: 0.9,
+            y: -0.5,
+            width: 0.5,
+            height: 0.01,
+        }
+        .clamped();
+        assert_close(
+            crop,
+            Crop {
+                x: 0.5,
+                y: 0.,
+                width: 0.5,
+                height: Crop::MIN_SIZE,
+            },
+        );
     }
 }

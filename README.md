@@ -33,6 +33,8 @@ Quick Video Editor has two modes, switched from the header bar:
 
 In both modes, the rotate buttons next to the options menu turn the video 90° counterclockwise or clockwise per click, and the preview turns with it. The Trimmer writes the rotation into the file's metadata, so a plain trim still copies the video without re-encoding; the Editor rotates the frames themselves. From the command line: `--rotate DEGREES`.
 
+The crop button next to them shows the whole frame with a rectangle over it: drag its corners or edges to resize it, drag inside to move it, and double-click to keep the whole frame again. Clicking the button again shows the cropped video, which is what both modes export. Cropping re-encodes the video. From the command line: `--crop WIDTHxHEIGHT+X+Y`, in pixels of the rotated video.
+
 The options menu sets the frame rate and resolution of the export: by default both match the (first) source video, or pick 24–60 fps or any custom rate, and 1080p, 720p or a custom size. **Snap to 0:59** makes the trim and the Editor's edges snap to the one-minute limit of many social networks. Other aspect ratios are letterboxed, never stretched.
 
 Dropping or opening a second video adds it at the end of the edit and switches to the Editor. The Editor exports with GStreamer Editing Services, the same engine as the preview, so the export matches what plays: H.264/AAC for `.mp4` and `.mkv`, VP9/Opus for `.webm`.

@@ -59,6 +59,7 @@ run_command(
 sources += files(
   'application.rs',
   'config.rs',
+  'crop_overlay.rs',
   'editor_timeline.rs',
   'engine.rs',
   'knob.rs',

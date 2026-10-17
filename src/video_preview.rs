@@ -7,6 +7,7 @@ mod imp {
     use super::*;
     use crate::{
         config::G_LOG_DOMAIN,
+        crop_overlay::VtCropOverlay,
         editor_timeline::VtEditorTimeline,
         engine::VtEngine,
         knob::VtKnob,
@@ -39,6 +40,8 @@ mod imp {
         overlay: TemplateChild<adw::ToastOverlay>,
         #[template_child]
         picture_video_preview: TemplateChild<gtk::Picture>,
+        #[template_child]
+        crop_overlay: TemplateChild<VtCropOverlay>,
         #[template_child]
         stack_video_preview: TemplateChild<gtk::Stack>,
         #[template_child]
@@ -103,6 +106,7 @@ mod imp {
             VtEditorTimeline::ensure_type();
             VtOriginalAudioTrack::ensure_type();
             VtKnob::ensure_type();
+            VtCropOverlay::ensure_type();
             Self::bind_template(klass);
         }
 
@@ -148,6 +152,16 @@ mod imp {
         fn constructed(&self) {
             let obj = self.obj();
             self.parent_constructed();
+
+            self.crop_overlay.connect_local("changed", false, {
+                let obj = obj.downgrade();
+                move |_| {
+                    let obj = obj.upgrade().unwrap();
+                    let imp = obj.imp();
+                    imp.engine().set_crop(imp.crop_overlay.crop());
+                    None
+                }
+            });
 
             self.timeline.connect_local("set-start-end", false, {
                 let obj = obj.downgrade();
@@ -743,6 +757,28 @@ double-click to reset",
             self.media_file.get().unwrap()
         }
 
+        /// Shows the whole frame with the crop rectangle over it while `editing` is set, and
+        /// the cropped video otherwise.
+        pub fn set_crop_editing(&self, editing: bool) {
+            let engine = self.engine();
+            engine.set_crop_suspended(editing);
+            self.crop_overlay.set_visible(editing);
+            self.refresh_crop_overlay();
+        }
+
+        pub fn is_crop_editing(&self) -> bool {
+            self.crop_overlay.is_visible()
+        }
+
+        /// Matches the crop rectangle to the engine's crop and the frame's shape.
+        pub fn refresh_crop_overlay(&self) {
+            let engine = self.engine();
+            if let Some((width, height)) = engine.rotated_size() {
+                self.crop_overlay.set_aspect(width as f64 / height as f64);
+            }
+            self.crop_overlay.set_crop(engine.crop());
+        }
+
         pub fn editor_timeline(&self) -> &VtEditorTimeline {
             &self.editor_timeline
         }
@@ -1078,6 +1114,18 @@ impl VtVideoPreview {
 
     pub fn engine(&self) -> crate::engine::VtEngine {
         self.imp().engine().clone()
+    }
+
+    pub fn set_crop_editing(&self, editing: bool) {
+        self.imp().set_crop_editing(editing);
+    }
+
+    pub fn is_crop_editing(&self) -> bool {
+        self.imp().is_crop_editing()
+    }
+
+    pub fn refresh_crop_overlay(&self) {
+        self.imp().refresh_crop_overlay();
     }
 
     pub fn editor_timeline(&self) -> crate::editor_timeline::VtEditorTimeline {

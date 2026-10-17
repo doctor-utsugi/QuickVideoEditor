@@ -8,6 +8,7 @@ mod application;
 use application::VtApplication;
 #[rustfmt::skip]
 mod config;
+mod crop_overlay;
 use config::G_LOG_DOMAIN;
 mod editor_timeline;
 mod engine;

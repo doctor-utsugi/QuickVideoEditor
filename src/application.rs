@@ -28,6 +28,7 @@ mod imp {
         remove_audio: Cell<bool>,
         speed: Cell<Option<f64>>,
         rotation: Cell<Option<i32>>,
+        crop: RefCell<Option<String>>,
         export_fps: Cell<Option<i32>>,
         export_size: RefCell<Option<String>>,
     }
@@ -134,6 +135,17 @@ mod imp {
             );
 
             obj.add_main_option(
+                "crop",
+                glib::Char::from(0u8),
+                glib::OptionFlags::NONE,
+                glib::OptionArg::String,
+                // Translators: --crop commandline option description.
+                &gettext("Crop the rotated video to WIDTHxHEIGHT+X+Y pixels"),
+                // Translators: --crop commandline option arg description.
+                Some(&gettext("GEOMETRY")),
+            );
+
+            obj.add_main_option(
                 "fps",
                 glib::Char::from(0u8),
                 glib::OptionFlags::NONE,
@@ -186,6 +198,9 @@ mod imp {
             }
             if let Some(rotation) = self.rotation.take() {
                 window.set_rotation(rotation);
+            }
+            if let Some(crop) = self.crop.take().as_deref().and_then(parse_geometry) {
+                window.set_crop(crop);
             }
             let size = self.export_size.take().and_then(|size| {
                 let (width, height) = size.split_once('x')?;
@@ -318,6 +333,12 @@ mod imp {
                     .and_then(|x| x.get::<f64>()),
             );
 
+            self.crop.replace(
+                options
+                    .lookup_value("crop", None)
+                    .and_then(|x| x.get::<String>()),
+            );
+
             self.rotation.set(
                 options
                     .lookup_value("rotate", None)
@@ -348,5 +369,30 @@ impl VtApplication {
             .property("flags", flags)
             .property("resource-base-path", "/io/github/doctor_utsugi/QuickVideoEditor")
             .build()
+    }
+}
+
+/// Parses `WIDTHxHEIGHT+X+Y` into width, height, x and y.
+fn parse_geometry(geometry: &str) -> Option<(i32, i32, i32, i32)> {
+    let (size, offset) = geometry.split_once('+')?;
+    let (width, height) = size.split_once('x')?;
+    let (x, y) = offset.split_once('+')?;
+    Some((
+        width.parse().ok()?,
+        height.parse().ok()?,
+        x.parse().ok()?,
+        y.parse().ok()?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_geometry_works() {
+        assert_eq!(parse_geometry("640x360+10+20"), Some((640, 360, 10, 20)));
+        assert_eq!(parse_geometry("640x360"), None);
+        assert_eq!(parse_geometry("axb+1+2"), None);
     }
 }
